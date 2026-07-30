@@ -18,60 +18,27 @@ from aiohttp import web
 import yt_dlp
 
 # ==== НАСТРОЙКИ ====
-# Токен можно оставить прямо тут, а на сервере — задать через переменную окружения
-# BOT_TOKEN (безопаснее: секрет не лежит в файле, который может утечь через git/бэкапы).
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737695772:AAE_-i3wnlvoOE3CCcKdx2uqJSHKwsP9eB8")  # СТАРЫЙ ТОКЕН ЗАСВЕЧЕН — ПЕРЕВЫПУСТИТЕ ЧЕРЕЗ @BotFather
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DOWNLOAD_DIR = "downloads"
 
-# --- Лимит размера файла ---
-# Обычный api.telegram.org НЕ ПРИНИМАЕТ от ботов файлы > 50 МБ — это ограничение
-# самого Telegram, а не этого кода, и обойти его без изменения инфраструктуры нельзя.
-#
-# Чтобы снять лимит (до ~2000 МБ), нужно поднять локальный Bot API сервер:
-#   https://github.com/tdlib/telegram-bot-api
-# Например через Docker:
-#   docker run -d -p 8081:8081 \
-#       -e TELEGRAM_API_ID=<ваш api_id> \
-#       -e TELEGRAM_API_HASH=<ваш api_hash> \
-#       -v bot-api-data:/var/lib/telegram-bot-api \
-#       aiogram/telegram-bot-api:latest
-# api_id и api_hash берутся на https://my.telegram.org
-#
-# Если LOCAL_API_URL не задан — бот работает как раньше, с лимитом 50 МБ,
-# но честно предупреждает об этом, а не пытается притвориться, что лимита нет.
-LOCAL_API_URL = os.environ.get("LOCAL_BOT_API_URL")  # например: "http://localhost:8081"
+LOCAL_API_URL = os.environ.get("LOCAL_BOT_API_URL")
 MAX_TELEGRAM_SIZE = (2000 if LOCAL_API_URL else 50) * 1024 * 1024
 
-# Путь к ffmpeg. На Windows (текущий ПК) можно оставить как есть или задать через
-# переменную окружения. На Linux-сервере ffmpeg обычно ставится через apt и уже
-# доступен в PATH — тогда переменную не задавайте, оставьте пустой список опций.
 FFMPEG_LOCATION = os.environ.get("FFMPEG_LOCATION", "")
 if not FFMPEG_LOCATION:
-    # локальный дефолт для текущего Windows-ПК — не актуально при переезде на сервер
     _default_win_ffmpeg = r"C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin"
     if os.path.isdir(_default_win_ffmpeg):
         FFMPEG_LOCATION = _default_win_ffmpeg
 
-# Свои cookies-файлы под каждую площадку (экспортируются расширением "Get cookies.txt LOCALLY",
-# заходить нужно залогиненным в соответствующий сайт). Instagram почти всегда требует куки
-# для reels/постов, TikTok обычно работает и без них, но иногда тоже просит.
 COOKIES_FILES = {
     "youtube": "cookies_youtube.txt",
     "instagram": "cookies_instagram.txt",
     "tiktok": "cookies_tiktok.txt",
 }
 
-# TikTok заблокирован в Узбекистане на уровне провайдеров — запросы к нему уходят
-# в таймаут без прокси/VPN. YouTube и Instagram у вас работают напрямую, поэтому
-# прокси применяется ТОЛЬКО для платформы "tiktok", остальные его не используют.
-#
-# Значение — адрес любого рабочего SOCKS5/HTTP прокси или локального порта VPN-клиента,
-# например: "socks5://127.0.0.1:1080" или "http://127.0.0.1:8080".
-# Можно также задать через переменную окружения TIKTOK_PROXY.
-TIKTOK_PROXY = os.environ.get("TIKTOK_PROXY", "")  # пусто = прокси не используется
+TIKTOK_PROXY = os.environ.get("TIKTOK_PROXY", "")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
 logging.basicConfig(level=logging.INFO)
 
 from aiogram.client.telegram import TelegramAPIServer
@@ -85,7 +52,6 @@ else:
 
 dp = Dispatcher()
 
-# url / платформа / доступные разрешения для последней присланной ссылки
 pending_urls: dict[int, str] = {}
 pending_platforms: dict[int, str] = {}
 pending_formats: dict[int, list[int]] = {}
@@ -111,7 +77,7 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "skip_download": True,
         "noplaylist": True,
         "extractor_args": {
-            "youtube": {"player_client": ["android", "web"]}   # обход бота
+            "youtube": {"player_client": ["android", "web"]}
         }
     }
     cookies_file = COOKIES_FILES.get(platform)
@@ -142,10 +108,11 @@ def build_quality_keyboard(heights: list[int]) -> InlineKeyboardMarkup:
 
 def format_for_quality(quality: str) -> dict:
     if quality == "q_best":
-        return {"format": "bestvideo+bestaudio/best", "merge_output_format": "mp4"}
+        # Принудительно H.264 + m4a для телефонов
+        return {"format": "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best", "merge_output_format": "mp4"}
     if quality.startswith("q_") and quality[2:].isdigit():
         h = quality[2:]
-        return {"format": f"bestvideo[height<={h}]+bestaudio/best[height<={h}]", "merge_output_format": "mp4"}
+        return {"format": f"bestvideo[height<={h}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<={h}][ext=mp4]/best", "merge_output_format": "mp4"}
     if quality == "q_audio_orig":
         return {"format": "bestaudio/best"}
     if quality == "q_audio":
@@ -218,7 +185,6 @@ async def handle_link(message: Message):
 
 
 @dp.callback_query(F.data.startswith("q_"))
-@dp.callback_query(F.data.startswith("q_"))
 async def handle_quality_choice(callback: CallbackQuery):
     user_id = callback.from_user.id
     url = pending_urls.get(user_id)
@@ -241,7 +207,7 @@ async def handle_quality_choice(callback: CallbackQuery):
         "quiet": True,
         "no_warnings": True,
         "extractor_args": {
-            "youtube": {"player_client": ["android", "web"]}   # обход бота
+            "youtube": {"player_client": ["android", "web"]}
         }
     }
 
@@ -280,7 +246,6 @@ async def handle_quality_choice(callback: CallbackQuery):
         return candidates[0]
 
     try:
-        # Используем asyncio.to_thread вместо loop.run_in_executor
         video_id, title = await asyncio.to_thread(run_download)
         filepath = find_downloaded_file(video_id)
 
@@ -324,9 +289,6 @@ async def handle_ping(request):
 
 
 async def start_keepalive_server():
-    """Фиктивный HTTP-сервер только для Render (там бесплатный тариф — только
-    веб-сервисы) и для внешнего пинга (cron-job.org и т.п.), чтобы процесс
-    не считался неактивным и не засыпал. На сам Telegram-бот не влияет."""
     port = int(os.environ.get("PORT", 8080))
     app = web.Application()
     app.router.add_get("/", handle_ping)
@@ -343,5 +305,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
