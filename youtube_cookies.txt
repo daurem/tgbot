@@ -1,2 +1,0 @@
-COOKIES_FILES
-'youtube': 'youtube_cookies.txt'
