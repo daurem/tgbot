@@ -238,16 +238,22 @@ async def handle_quality_choice(callback: CallbackQuery):
     opts = format_for_quality(quality)
 
     ydl_opts = {
-    # ... остальные опции
-    "format": "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-    "merge_output_format": "mp4",
-    "postprocessors": [{
+    **opts,  # ← берём настройки из format_for_quality (выбор пользователя)
+    "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "extractor_args": {
+        "youtube": {"player_client": ["android"]}  # ← обход проверки бота
+        }
+     }
+
+# Если это видео (не аудио) – добавим конвертацию в MP4 для телефонов
+    if quality not in ("q_audio", "q_audio_orig"):
+    ydl_opts.setdefault("postprocessors", []).append({
         "key": "FFmpegVideoConvertor",
         "preferedformat": "mp4",
-         }],
-    }
-    if FFMPEG_LOCATION:
-        ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+    })
 
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
