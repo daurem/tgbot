@@ -18,7 +18,7 @@ from aiohttp import web
 import yt_dlp
 
 # ==== НАСТРОЙКИ ====
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737695772:AAE_-i3wnlvoOE3CCcKdx2uqJSHKwsP9eB8")
 DOWNLOAD_DIR = "downloads"
 
 LOCAL_API_URL = os.environ.get("LOCAL_BOT_API_URL")
