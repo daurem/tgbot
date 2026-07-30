@@ -14,12 +14,13 @@ from aiogram.types import (
     InlineKeyboardButton,
     FSInputFile,
 )
+from aiohttp import web
 import yt_dlp
 
 # ==== НАСТРОЙКИ ====
 # Токен можно оставить прямо тут, а на сервере — задать через переменную окружения
 # BOT_TOKEN (безопаснее: секрет не лежит в файле, который может утечь через git/бэкапы).
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737695772:AAETHZpRqHFRrxj9tpGyY3Gev8TCVQK-N28")  # СТАРЫЙ ТОКЕН ЗАСВЕЧЕН — ПЕРЕВЫПУСТИТЕ ЧЕРЕЗ @BotFather
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬТЕ_НОВЫЙ_ТОКЕН_СЮДА")  # СТАРЫЙ ТОКЕН ЗАСВЕЧЕН — ПЕРЕВЫПУСТИТЕ ЧЕРЕЗ @BotFather
 DOWNLOAD_DIR = "downloads"
 
 # --- Лимит размера файла ---
@@ -322,7 +323,26 @@ async def handle_quality_choice(callback: CallbackQuery):
         pending_formats.pop(user_id, None)
 
 
+async def handle_ping(request):
+    return web.Response(text="Bot is alive")
+
+
+async def start_keepalive_server():
+    """Фиктивный HTTP-сервер только для Render (там бесплатный тариф — только
+    веб-сервисы) и для внешнего пинга (cron-job.org и т.п.), чтобы процесс
+    не считался неактивным и не засыпал. На сам Telegram-бот не влияет."""
+    port = int(os.environ.get("PORT", 8080))
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Keepalive HTTP-сервер слушает порт {port}")
+
+
 async def main():
+    await start_keepalive_server()
     await dp.start_polling(bot)
 
 
