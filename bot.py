@@ -1,0 +1,330 @@
+import asyncio
+import glob
+import logging
+import os
+import re
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.filters import Command
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    FSInputFile,
+)
+import yt_dlp
+
+# ==== НАСТРОЙКИ ====
+# Токен можно оставить прямо тут, а на сервере — задать через переменную окружения
+# BOT_TOKEN (безопаснее: секрет не лежит в файле, который может утечь через git/бэкапы).
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737695772:AAETHZpRqHFRrxj9tpGyY3Gev8TCVQK-N28")  # СТАРЫЙ ТОКЕН ЗАСВЕЧЕН — ПЕРЕВЫПУСТИТЕ ЧЕРЕЗ @BotFather
+DOWNLOAD_DIR = "downloads"
+
+# --- Лимит размера файла ---
+# Обычный api.telegram.org НЕ ПРИНИМАЕТ от ботов файлы > 50 МБ — это ограничение
+# самого Telegram, а не этого кода, и обойти его без изменения инфраструктуры нельзя.
+#
+# Чтобы снять лимит (до ~2000 МБ), нужно поднять локальный Bot API сервер:
+#   https://github.com/tdlib/telegram-bot-api
+# Например через Docker:
+#   docker run -d -p 8081:8081 \
+#       -e TELEGRAM_API_ID=<ваш api_id> \
+#       -e TELEGRAM_API_HASH=<ваш api_hash> \
+#       -v bot-api-data:/var/lib/telegram-bot-api \
+#       aiogram/telegram-bot-api:latest
+# api_id и api_hash берутся на https://my.telegram.org
+#
+# Если LOCAL_API_URL не задан — бот работает как раньше, с лимитом 50 МБ,
+# но честно предупреждает об этом, а не пытается притвориться, что лимита нет.
+LOCAL_API_URL = os.environ.get("LOCAL_BOT_API_URL")  # например: "http://localhost:8081"
+MAX_TELEGRAM_SIZE = (2000 if LOCAL_API_URL else 50) * 1024 * 1024
+
+# Путь к ffmpeg. На Windows (текущий ПК) можно оставить как есть или задать через
+# переменную окружения. На Linux-сервере ffmpeg обычно ставится через apt и уже
+# доступен в PATH — тогда переменную не задавайте, оставьте пустой список опций.
+FFMPEG_LOCATION = os.environ.get("FFMPEG_LOCATION", "")
+if not FFMPEG_LOCATION:
+    # локальный дефолт для текущего Windows-ПК — не актуально при переезде на сервер
+    _default_win_ffmpeg = r"C:\Users\user\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin"
+    if os.path.isdir(_default_win_ffmpeg):
+        FFMPEG_LOCATION = _default_win_ffmpeg
+
+# Свои cookies-файлы под каждую площадку (экспортируются расширением "Get cookies.txt LOCALLY",
+# заходить нужно залогиненным в соответствующий сайт). Instagram почти всегда требует куки
+# для reels/постов, TikTok обычно работает и без них, но иногда тоже просит.
+COOKIES_FILES = {
+    "youtube": "cookies_youtube.txt",
+    "instagram": "cookies_instagram.txt",
+    "tiktok": "cookies_tiktok.txt",
+}
+
+# TikTok заблокирован в Узбекистане на уровне провайдеров — запросы к нему уходят
+# в таймаут без прокси/VPN. YouTube и Instagram у вас работают напрямую, поэтому
+# прокси применяется ТОЛЬКО для платформы "tiktok", остальные его не используют.
+#
+# Значение — адрес любого рабочего SOCKS5/HTTP прокси или локального порта VPN-клиента,
+# например: "socks5://127.0.0.1:1080" или "http://127.0.0.1:8080".
+# Можно также задать через переменную окружения TIKTOK_PROXY.
+TIKTOK_PROXY = os.environ.get("TIKTOK_PROXY", "")  # пусто = прокси не используется
+
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+logging.basicConfig(level=logging.INFO)
+
+from aiogram.client.telegram import TelegramAPIServer
+
+if LOCAL_API_URL:
+    local_server = TelegramAPIServer.from_base(LOCAL_API_URL)
+    session = AiohttpSession(api=local_server)
+    bot = Bot(token=BOT_TOKEN, session=session)
+else:
+    bot = Bot(token=BOT_TOKEN)
+
+dp = Dispatcher()
+
+# url / платформа / доступные разрешения для последней присланной ссылки
+pending_urls: dict[int, str] = {}
+pending_platforms: dict[int, str] = {}
+pending_formats: dict[int, list[int]] = {}
+
+PLATFORM_PATTERNS = {
+    "youtube": re.compile(r"(youtube\.com|youtu\.be)"),
+    "instagram": re.compile(r"instagram\.com"),
+    "tiktok": re.compile(r"tiktok\.com"),
+}
+
+
+def detect_platform(url: str) -> str | None:
+    for name, pattern in PLATFORM_PATTERNS.items():
+        if pattern.search(url):
+            return name
+    return None
+
+
+def probe_formats(url: str, platform: str) -> list[int]:
+    """Достаём список реально доступных потоков без скачивания.
+
+    Для Instagram/TikTok обычно есть только один вариант качества —
+    в этом случае вернётся пустой список, и клавиатура покажет
+    просто "Лучшее качество" + "Только аудио", без выбора разрешения.
+    """
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+    }
+    cookies_file = COOKIES_FILES.get(platform)
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts["cookiefile"] = cookies_file
+    if platform == "tiktok" and TIKTOK_PROXY:
+        ydl_opts["proxy"] = TIKTOK_PROXY
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    formats = info.get("formats", [])
+    # берём только видеопотоки с известной высотой
+    heights = sorted(
+        {f["height"] for f in formats if f.get("height") and f.get("vcodec") != "none"},
+        reverse=True,
+    )
+    return heights
+
+
+def build_quality_keyboard(heights: list[int]) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(text="Лучшее доступное качество", callback_data="q_best")]]
+    for h in heights:
+        buttons.append([InlineKeyboardButton(text=f"{h}p", callback_data=f"q_{h}")])
+    buttons.append([InlineKeyboardButton(text="Аудио — оригинал (без потерь)", callback_data="q_audio_orig")])
+    buttons.append([InlineKeyboardButton(text="Аудио — MP3 320kbps", callback_data="q_audio")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def format_for_quality(quality: str) -> dict:
+    if quality == "q_best":
+        return {"format": "bestvideo+bestaudio/best"}
+    if quality == "q_audio_orig":
+        # Без перекодирования: как есть в оригинале (обычно m4a или opus) — без потерь
+        return {"format": "bestaudio/best"}
+    if quality == "q_audio":
+        return {
+            "format": "bestaudio/best",
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "320",
+                }
+            ],
+        }
+    if quality.startswith("q_") and quality[2:].isdigit():
+        h = quality[2:]
+        return {"format": f"bestvideo[height<={h}]+bestaudio/best[height<={h}]"}
+    return {"format": "bestvideo+bestaudio/best"}
+
+
+@dp.message(Command("start"))
+async def start(message: Message):
+    limit_note = (
+        "Лимит на размер файла снят (локальный сервер, до 2000 МБ)."
+        if LOCAL_API_URL
+        else "Внимание: без локального Bot API сервера действует лимит Telegram в 50 МБ на файл."
+    )
+    await message.answer(
+        "Привет! Пришли ссылку на видео с YouTube, Instagram или TikTok, "
+        "и я покажу доступные варианты скачивания.\n\n" + limit_note
+    )
+
+
+@dp.message(F.text)
+async def handle_link(message: Message):
+    url = message.text.strip()
+
+    platform = detect_platform(url)
+    if platform is None:
+        await message.answer(
+            "Это не похоже на ссылку YouTube, Instagram или TikTok. Пришли корректный URL."
+        )
+        return
+
+    status = await message.answer("Смотрю, какие варианты качества доступны...")
+
+    loop = asyncio.get_event_loop()
+    try:
+        heights = await loop.run_in_executor(None, probe_formats, url, platform)
+    except Exception as e:
+        logging.exception("Ошибка при получении форматов")
+        note = ""
+        if platform == "tiktok":
+            note = (
+                "\n\nПохоже, TikTok недоступен без прокси/VPN (это блокировка на уровне "
+                "провайдера в Узбекистане, а не проблема бота). Задай TIKTOK_PROXY в коде "
+                "или через переменную окружения — адрес рабочего SOCKS5/HTTP прокси или "
+                "локального порта VPN-клиента."
+            )
+        elif platform == "instagram":
+            note = (
+                f"\n\nЕсли видео приватное или требует входа — положи файл "
+                f"{COOKIES_FILES[platform]} рядом со скриптом (экспорт куки из "
+                f"залогиненного браузера)."
+            )
+        await status.edit_text(f"Не удалось получить информацию о видео: {e}" + note)
+        return
+
+    pending_urls[message.from_user.id] = url
+    pending_platforms[message.from_user.id] = platform
+    pending_formats[message.from_user.id] = heights
+
+    await status.edit_text("Выбери качество:", reply_markup=build_quality_keyboard(heights))
+
+
+@dp.callback_query(F.data.startswith("q_"))
+async def handle_quality_choice(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    url = pending_urls.get(user_id)
+    platform = pending_platforms.get(user_id)
+
+    if not url or not platform:
+        await callback.answer("Ссылка устарела, пришли её заново.", show_alert=True)
+        return
+
+    await callback.answer()
+    status_msg = await callback.message.edit_text("Скачиваю, подожди немного...")
+
+    quality = callback.data
+    opts = format_for_quality(quality)
+
+    ydl_opts = {
+        **opts,
+        "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
+        # Контейнер для склейки видео+аудио НЕ фиксируем на mp4: если лучшие потоки
+        # в несовместимых с mp4 кодеках (частый случай для YouTube — vp9/opus),
+        # принудительный mp4 заставляет ffmpeg перекодировать — а это реальная
+        # потеря качества и долгое время. Без merge_output_format yt-dlp сам
+        # выбирает контейнер (mp4, если кодеки позволяют без перекодирования,
+        # иначе mkv) и просто склеивает потоки без re-encode.
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+    }
+    if FFMPEG_LOCATION:
+        ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+
+    cookies_file = COOKIES_FILES.get(platform)
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts["cookiefile"] = cookies_file
+    if platform == "tiktok" and TIKTOK_PROXY:
+        ydl_opts["proxy"] = TIKTOK_PROXY
+
+    loop = asyncio.get_event_loop()
+
+    def run_download():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_id = info.get("id", "video")
+            title = info.get("title", "video")
+            return video_id, title
+
+    def find_downloaded_file(video_id: str) -> str | None:
+        # Расширение заранее неизвестно (mp4/mkv/webm/mp3/m4a/opus — зависит от
+        # выбора качества и того, что реально было доступно), поэтому ищем
+        # по маске вместо жёстко прописанного .mp4, и пропускаем недокачанные
+        # временные файлы yt-dlp.
+        pattern = f"{DOWNLOAD_DIR}/{video_id}_{user_id}.*"
+        candidates = [
+            f for f in glob.glob(pattern)
+            if not f.endswith((".part", ".ytdl", ".temp"))
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=os.path.getmtime, reverse=True)
+        return candidates[0]
+
+    try:
+        video_id, title = await loop.run_in_executor(None, run_download)
+        filepath = find_downloaded_file(video_id)
+
+        if not filepath:
+            await status_msg.edit_text("Не удалось найти скачанный файл. Попробуй другое качество.")
+            return
+
+        file_size = os.path.getsize(filepath)
+
+        if file_size > MAX_TELEGRAM_SIZE:
+            note = (
+                "" if LOCAL_API_URL else
+                "\n\nЧтобы снимать этот лимит, подними локальный Bot API сервер (см. LOCAL_API_URL в коде)."
+            )
+            await status_msg.edit_text(
+                f"Файл получился {file_size / 1024 / 1024:.1f} МБ — это больше текущего лимита "
+                f"в {MAX_TELEGRAM_SIZE // 1024 // 1024} МБ. Попробуй качество пониже." + note
+            )
+        else:
+            await status_msg.edit_text("Загружаю файл в Telegram...")
+            if quality in ("q_audio", "q_audio_orig"):
+                await callback.message.answer_audio(FSInputFile(filepath), title=title)
+            else:
+                await callback.message.answer_video(FSInputFile(filepath), caption=title)
+            await status_msg.delete()
+
+        os.remove(filepath)
+
+    except Exception as e:
+        logging.exception("Ошибка при скачивании")
+        await status_msg.edit_text(f"Произошла ошибка: {e}")
+
+    finally:
+        pending_urls.pop(user_id, None)
+        pending_platforms.pop(user_id, None)
+        pending_formats.pop(user_id, None)
+
+
+async def main():
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
