@@ -148,8 +148,10 @@ def format_for_quality(quality: str) -> dict:
     if quality == "q_best":
         return {"format": "bestvideo+bestaudio/best", "merge_output_format": "mp4"}
     if quality.startswith("q_") and quality[2:].isdigit():
-    h = quality[2:]
+        h = quality[2:]
         return {"format": f"bestvideo[height<={h}]+bestaudio/best[height<={h}]", "merge_output_format": "mp4"}
+    if quality == "q_audio_orig":
+        return {"format": "bestaudio/best"}
     if quality == "q_audio":
         return {
             "format": "bestaudio/best",
@@ -161,9 +163,6 @@ def format_for_quality(quality: str) -> dict:
                 }
             ],
         }
-    if quality.startswith("q_") and quality[2:].isdigit():
-        h = quality[2:]
-        return {"format": f"bestvideo[height<={h}]+bestaudio/best[height<={h}]"}
     return {"format": "bestvideo+bestaudio/best"}
 
 
