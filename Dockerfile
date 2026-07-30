@@ -7,6 +7,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py .
+# Копируем все файлы проекта (включая youtube_cookies.txt и bot.py)
+COPY . .
 
 CMD ["python", "bot.py"]
