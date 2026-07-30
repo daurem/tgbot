@@ -238,17 +238,13 @@ async def handle_quality_choice(callback: CallbackQuery):
     opts = format_for_quality(quality)
 
     ydl_opts = {
-        **opts,
-        "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
-        # Контейнер для склейки видео+аудио НЕ фиксируем на mp4: если лучшие потоки
-        # в несовместимых с mp4 кодеках (частый случай для YouTube — vp9/opus),
-        # принудительный mp4 заставляет ffmpeg перекодировать — а это реальная
-        # потеря качества и долгое время. Без merge_output_format yt-dlp сам
-        # выбирает контейнер (mp4, если кодеки позволяют без перекодирования,
-        # иначе mkv) и просто склеивает потоки без re-encode.
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
+    # ... остальные опции
+    "format": "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    "merge_output_format": "mp4",
+    "postprocessors": [{
+        "key": "FFmpegVideoConvertor",
+        "preferedformat": "mp4",
+         }],
     }
     if FFMPEG_LOCATION:
         ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
