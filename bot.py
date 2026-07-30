@@ -344,7 +344,7 @@ async def start_keepalive_server():
 async def main():
     await start_keepalive_server()
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
