@@ -238,22 +238,18 @@ async def handle_quality_choice(callback: CallbackQuery):
     opts = format_for_quality(quality)
 
     ydl_opts = {
-    **opts,  # ← берём настройки из format_for_quality (выбор пользователя)
-    "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "extractor_args": {
-        "youtube": {"player_client": ["android"]}  # ← обход проверки бота
+        **opts,
+        "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "extractor_args": {
+            "youtube": {"player_client": ["android"]}
         }
-     }
+    }
 
-# Если это видео (не аудио) – добавим конвертацию в MP4 для телефонов
-    if quality not in ("q_audio", "q_audio_orig"):
-    ydl_opts.setdefault("postprocessors", []).append({
-        "key": "FFmpegVideoConvertor",
-        "preferedformat": "mp4",
-    })
+    if FFMPEG_LOCATION:
+        ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
 
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
@@ -261,7 +257,12 @@ async def handle_quality_choice(callback: CallbackQuery):
     if platform == "tiktok" and TIKTOK_PROXY:
         ydl_opts["proxy"] = TIKTOK_PROXY
 
-    loop = asyncio.get_event_loop()
+    # Если это видео (не аудио) – принудительно конвертируем в MP4 для телефонов
+    if quality not in ("q_audio", "q_audio_orig"):
+        ydl_opts.setdefault("postprocessors", []).append({
+            "key": "FFmpegVideoConvertor",
+            "preferedformat": "mp4",
+        })
 
     def run_download():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
