@@ -287,7 +287,7 @@ async def handle_quality_choice(callback: CallbackQuery):
         return candidates[0]
 
     try:
-        video_id, title = await loop.run_in_executor(None, run_download)
+        video_id, title = await asyncio.to_thread(run_download)
         filepath = find_downloaded_file(video_id)
 
         if not filepath:
