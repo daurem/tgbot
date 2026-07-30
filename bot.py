@@ -146,10 +146,10 @@ def build_quality_keyboard(heights: list[int]) -> InlineKeyboardMarkup:
 
 def format_for_quality(quality: str) -> dict:
     if quality == "q_best":
-        return {"format": "bestvideo+bestaudio/best"}
-    if quality == "q_audio_orig":
-        # Без перекодирования: как есть в оригинале (обычно m4a или opus) — без потерь
-        return {"format": "bestaudio/best"}
+        return {"format": "bestvideo+bestaudio/best", "merge_output_format": "mp4"}
+    if quality.startswith("q_") and quality[2:].isdigit():
+    h = quality[2:]
+        return {"format": f"bestvideo[height<={h}]+bestaudio/best[height<={h}]", "merge_output_format": "mp4"}
     if quality == "q_audio":
         return {
             "format": "bestaudio/best",
