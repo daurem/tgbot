@@ -105,17 +105,14 @@ def detect_platform(url: str) -> str | None:
 
 
 def probe_formats(url: str, platform: str) -> list[int]:
-    """Достаём список реально доступных потоков без скачивания.
-
-    Для Instagram/TikTok обычно есть только один вариант качества —
-    в этом случае вернётся пустой список, и клавиатура покажет
-    просто "Лучшее качество" + "Только аудио", без выбора разрешения.
-    """
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
+        "extractor_args": {
+            "youtube": {"player_client": ["android", "web"]}   # обход бота
+        }
     }
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
@@ -127,7 +124,6 @@ def probe_formats(url: str, platform: str) -> list[int]:
         info = ydl.extract_info(url, download=False)
 
     formats = info.get("formats", [])
-    # берём только видеопотоки с известной высотой
     heights = sorted(
         {f["height"] for f in formats if f.get("height") and f.get("vcodec") != "none"},
         reverse=True,
@@ -222,6 +218,7 @@ async def handle_link(message: Message):
 
 
 @dp.callback_query(F.data.startswith("q_"))
+@dp.callback_query(F.data.startswith("q_"))
 async def handle_quality_choice(callback: CallbackQuery):
     user_id = callback.from_user.id
     url = pending_urls.get(user_id)
@@ -244,7 +241,7 @@ async def handle_quality_choice(callback: CallbackQuery):
         "quiet": True,
         "no_warnings": True,
         "extractor_args": {
-            "youtube": {"player_client": ["android"]}
+            "youtube": {"player_client": ["android", "web"]}   # обход бота
         }
     }
 
@@ -257,7 +254,7 @@ async def handle_quality_choice(callback: CallbackQuery):
     if platform == "tiktok" and TIKTOK_PROXY:
         ydl_opts["proxy"] = TIKTOK_PROXY
 
-    # Если это видео (не аудио) – принудительно конвертируем в MP4 для телефонов
+    # Для видео – принудительно конвертируем в MP4 (для телефонов)
     if quality not in ("q_audio", "q_audio_orig"):
         ydl_opts.setdefault("postprocessors", []).append({
             "key": "FFmpegVideoConvertor",
@@ -272,10 +269,6 @@ async def handle_quality_choice(callback: CallbackQuery):
             return video_id, title
 
     def find_downloaded_file(video_id: str) -> str | None:
-        # Расширение заранее неизвестно (mp4/mkv/webm/mp3/m4a/opus — зависит от
-        # выбора качества и того, что реально было доступно), поэтому ищем
-        # по маске вместо жёстко прописанного .mp4, и пропускаем недокачанные
-        # временные файлы yt-dlp.
         pattern = f"{DOWNLOAD_DIR}/{video_id}_{user_id}.*"
         candidates = [
             f for f in glob.glob(pattern)
@@ -287,6 +280,7 @@ async def handle_quality_choice(callback: CallbackQuery):
         return candidates[0]
 
     try:
+        # Используем asyncio.to_thread вместо loop.run_in_executor
         video_id, title = await asyncio.to_thread(run_download)
         filepath = find_downloaded_file(video_id)
 
