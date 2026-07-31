@@ -17,6 +17,10 @@ from aiogram.types import (
 from aiohttp import web
 import yt_dlp
 
+# ==== ЯВНО ПОДКЛЮЧАЕМ ПЛАГИН ДЛЯ PO-TOKEN ====
+# Это гарантирует, что yt-dlp его увидит и зарегистрирует
+import bgutil_ytdlp_pot_provider  # noqa: F401
+
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -56,6 +60,16 @@ for _platform, _fname in COOKIES_FILES.items():
 if YOUTUBE_PROXY:
     logging.info("[proxy] YOUTUBE_PROXY задан, буду использовать прокси для YouTube")
 
+# Проверка, что плагин зарегистрирован (для диагностики)
+try:
+    from yt_dlp.plugins import PLUGINS
+    if "bgutil_ytdlp_pot_provider" in str(PLUGINS):
+        logging.info("[plugin] Плагин bgutil-ytdlp-pot-provider успешно зарегистрирован")
+    else:
+        logging.warning("[plugin] Плагин не найден в yt-dlp — возможно, он не загрузился")
+except Exception as e:
+    logging.warning(f"[plugin] Не удалось проверить регистрацию плагина: {e}")
+
 from aiogram.client.telegram import TelegramAPIServer
 
 if LOCAL_API_URL:
@@ -86,19 +100,23 @@ def detect_platform(url: str) -> str | None:
 
 
 def probe_formats(url: str, platform: str) -> list[int]:
+    # === ФОРМИРУЕМ ПАРАМЕТРЫ ДЛЯ YT-DLP ===
+    # Используем список строк для extractor_args — это стандартный способ
+    extractor_args = [
+        "player_client=android,web",
+        f"pot_provider=http://127.0.0.1:4416",
+    ]
+    
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
         "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"],
-                # === ИСПРАВЛЕНИЕ: указываем адрес PO‑Token провайдера ===
-                "pot_provider": ["http://127.0.0.1:4416"]
-            }
+            "youtube": extractor_args
         }
     }
+    
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
         ydl_opts["cookiefile"] = cookies_file
@@ -106,6 +124,9 @@ def probe_formats(url: str, platform: str) -> list[int]:
         ydl_opts["proxy"] = TIKTOK_PROXY
     if platform == "youtube" and YOUTUBE_PROXY:
         ydl_opts["proxy"] = YOUTUBE_PROXY
+
+    # Отладка: выведем опции (убрать после отладки)
+    logging.debug(f"[probe] ydl_opts: {ydl_opts}")
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -187,7 +208,8 @@ async def handle_link(message: Message):
                 "\n\nYouTube требует подтверждения, что это не бот. Обычно причина — "
                 "IP хостинга (Render/Railway и т.п. в чёрных списках Google), а не сами куки. "
                 f"Проверь, что файл {COOKIES_FILES['youtube']} свежий и лежит рядом со скриптом, "
-                "и при необходимости задай YOUTUBE_PROXY (резидентный/мобильный прокси)."
+                "и при необходимости задай YOUTUBE_PROXY (резидентный/мобильный прокси).\n"
+                "Также убедись, что PO-Token провайдер запущен (bgutil) и доступен по 127.0.0.1:4416."
             )
         elif platform == "tiktok":
             note = (
@@ -228,7 +250,12 @@ async def handle_quality_choice(callback: CallbackQuery):
     quality = callback.data
     opts = format_for_quality(quality)
 
-    # === ИСПРАВЛЕНИЕ: добавляем pot_provider и в блок скачивания ===
+    # === ФОРМИРУЕМ ПАРАМЕТРЫ ДЛЯ СКАЧИВАНИЯ ===
+    extractor_args = [
+        "player_client=android,web",
+        f"pot_provider=http://127.0.0.1:4416",
+    ]
+
     ydl_opts = {
         **opts,
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
@@ -236,10 +263,7 @@ async def handle_quality_choice(callback: CallbackQuery):
         "quiet": True,
         "no_warnings": True,
         "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"],
-                "pot_provider": ["http://127.0.0.1:4416"]
-            }
+            "youtube": extractor_args
         }
     }
 
