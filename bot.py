@@ -19,7 +19,13 @@ import yt_dlp
 
 # ==== ЯВНО ПОДКЛЮЧАЕМ ПЛАГИН ДЛЯ PO-TOKEN ====
 # Это гарантирует, что yt-dlp его увидит и зарегистрирует
-import bgutil_ytdlp_pot_provider  # noqa: F401
+# Проверка, что плагин загружен (необязательно)
+try:
+    from yt_dlp.plugins import PLUGINS
+    if any("bgutil" in str(p) for p in PLUGINS):
+        logging.info("Плагин bgutil-ytdlp-pot-provider загружен")
+except Exception:
+    pass
 
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
