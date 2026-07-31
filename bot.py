@@ -16,7 +16,6 @@ from aiogram.types import (
 )
 from aiohttp import web
 import yt_dlp
-import bgutil_ytdlp_pot_provider  # это зарегистрирует плагин в yt-dlp
 
 # ==== ЯВНО ПОДКЛЮЧАЕМ ПЛАГИН ДЛЯ PO-TOKEN ====
 # Это гарантирует, что yt-dlp его увидит и зарегистрирует
