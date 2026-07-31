@@ -325,8 +325,20 @@ async def start_keepalive_server():
     logging.info(f"Keepalive HTTP-сервер слушает порт {port}")
 
 
+async def check_pot_provider():
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:4416/ping", timeout=5) as resp:
+            if resp.status == 200:
+                logging.info("[pot] PO-Token провайдер отвечает на 127.0.0.1:4416")
+                return
+    except Exception as e:
+        logging.warning(f"[pot] PO-Token провайдер недоступен: {e}")
+
+
 async def main():
     await start_keepalive_server()
+    await check_pot_provider()
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
