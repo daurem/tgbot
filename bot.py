@@ -17,11 +17,6 @@ from aiogram.types import (
 from aiohttp import web
 import yt_dlp
 
-# ==== ЯВНО ПОДКЛЮЧАЕМ ПЛАГИН ДЛЯ PO-TOKEN ====
-# Это гарантирует, что yt-dlp его увидит и зарегистрирует
-# Проверка, что плагин загружен (необязательно)
-
-
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -61,16 +56,6 @@ for _platform, _fname in COOKIES_FILES.items():
 if YOUTUBE_PROXY:
     logging.info("[proxy] YOUTUBE_PROXY задан, буду использовать прокси для YouTube")
 
-# Проверка, что плагин зарегистрирован (для диагностики)
-try:
-    from yt_dlp.plugins import PLUGINS
-    if "bgutil_ytdlp_pot_provider" in str(PLUGINS):
-        logging.info("[plugin] Плагин bgutil-ytdlp-pot-provider успешно зарегистрирован")
-    else:
-        logging.warning("[plugin] Плагин не найден в yt-dlp — возможно, он не загрузился")
-except Exception as e:
-    logging.warning(f"[plugin] Не удалось проверить регистрацию плагина: {e}")
-
 from aiogram.client.telegram import TelegramAPIServer
 
 if LOCAL_API_URL:
@@ -109,7 +94,7 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "extractor_args": {
             "youtube": [
                 "player_client=android,web",
-                "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+                "pot_provider=http://127.0.0.1:4416"
             ]
         }
     }
@@ -252,7 +237,7 @@ async def handle_quality_choice(callback: CallbackQuery):
         "extractor_args": {
             "youtube": [
                 "player_client=android,web",
-                "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+                "pot_provider=http://127.0.0.1:4416"
             ]
         }
     }
@@ -331,6 +316,7 @@ async def handle_quality_choice(callback: CallbackQuery):
         pending_platforms.pop(user_id, None)
         pending_formats.pop(user_id, None)
 
+
 async def handle_ping(request):
     return web.Response(text="Bot is alive")
 
@@ -362,6 +348,7 @@ async def main():
     await check_pot_provider()
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
