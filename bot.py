@@ -91,6 +91,7 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
+        "format": "best",  # <-- добавлено для предотвращения ошибки "Requested format is not available"
         "extractor_args": {
             "youtube": [
                 "player_client=android,web",
