@@ -113,11 +113,11 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "noplaylist": True,
         "format": "best",
         "extractor_args": {
-            "youtube": [
-                "player_client=android,web",
-                "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
-            ]
-        }
+        "youtube": [
+                 "player_client=android,web",
+                 "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+                 ]
+         }
     }
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
@@ -250,10 +250,12 @@ async def handle_quality_choice(callback: CallbackQuery):
     opts = format_for_quality(quality)
 
     # === ФОРМИРУЕМ ПАРАМЕТРЫ ДЛЯ СКАЧИВАНИЯ ===
-    extractor_args = [
+    "extractor_args": {
+    "youtube": [
         "player_client=android,web",
-        f"pot_provider=http://127.0.0.1:4416",
-    ]
+        "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+        ]
+    }
 
     ydl_opts = {
         **opts,
