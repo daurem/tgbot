@@ -1,3 +1,4 @@
 aiogram
 yt-dlp>=2026.7.4
 aiohttp
+bgutil-ytdlp-pot-provider
