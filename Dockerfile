@@ -18,7 +18,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # === ДОБАВЛЯЕМ ЯВНУЮ УСТАНОВКУ ПЛАГИНА ===
-RUN pip install --no-cache-dir bgutil-ytdlp-pot-provider==1.3.1
 
 COPY . .
 RUN chmod +x /app/start.sh
