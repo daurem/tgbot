@@ -92,7 +92,11 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "skip_download": True,
         "noplaylist": True,
         "extractor_args": {
-            "youtube": {"player_client": ["android", "web"]}
+            "youtube": {
+                "player_client": ["android", "web"],
+                # === ИСПРАВЛЕНИЕ: указываем адрес PO‑Token провайдера ===
+                "pot_provider": ["http://127.0.0.1:4416"]
+            }
         }
     }
     cookies_file = COOKIES_FILES.get(platform)
@@ -224,6 +228,7 @@ async def handle_quality_choice(callback: CallbackQuery):
     quality = callback.data
     opts = format_for_quality(quality)
 
+    # === ИСПРАВЛЕНИЕ: добавляем pot_provider и в блок скачивания ===
     ydl_opts = {
         **opts,
         "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
@@ -231,7 +236,10 @@ async def handle_quality_choice(callback: CallbackQuery):
         "quiet": True,
         "no_warnings": True,
         "extractor_args": {
-            "youtube": {"player_client": ["android", "web"]}
+            "youtube": {
+                "player_client": ["android", "web"],
+                "pot_provider": ["http://127.0.0.1:4416"]
+            }
         }
     }
 
