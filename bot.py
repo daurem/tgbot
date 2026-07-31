@@ -91,7 +91,7 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        "format": "bestvideo+bestaudio",  # явно указываем формат
+        'format': 'bestvideo+bestaudio/best',  # явно указываем формат
         "extractor_args": {
             "youtube": [
                 "pot_provider=http://127.0.0.1:4416"
@@ -134,10 +134,10 @@ def format_for_quality(quality: str) -> dict:
         h = quality[2:]
         return {"format": f"bestvideo[height<={h}][ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[height<={h}][ext=mp4]/best", "merge_output_format": "mp4"}
     if quality == "q_audio_orig":
-        return {"format": "bestaudio/best"}
+        return {'format': 'bestvideo+bestaudio/best'}
     if quality == "q_audio":
         return {
-            "format": "bestaudio/best",
+            'format': 'bestvideo+bestaudio/best',
             "postprocessors": [
                 {
                     "key": "FFmpegExtractAudio",
@@ -146,7 +146,7 @@ def format_for_quality(quality: str) -> dict:
                 }
             ],
         }
-    return {"format": "bestvideo+bestaudio/best"}
+    return {'format': 'bestvideo+bestaudio/best'}
 
 
 @dp.message(Command("start"))
