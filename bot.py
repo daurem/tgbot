@@ -246,40 +246,40 @@ async def handle_quality_choice(callback: CallbackQuery):
     await callback.answer()
     status_msg = await callback.message.edit_text("Скачиваю, подожди немного...")
 
-quality = callback.data
-opts = format_for_quality(quality)
+    quality = callback.data
+    opts = format_for_quality(quality)
 
-ydl_opts = {
-    **opts,
-    "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "extractor_args": {
-        "youtube": [
-            "player_client=android,web",
-            "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
-        ]
+    ydl_opts = {
+        **opts,
+        "outtmpl": f"{DOWNLOAD_DIR}/%(id)s_{user_id}.%(ext)s",
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "extractor_args": {
+            "youtube": [
+                "player_client=android,web",
+                "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+            ]
+        }
     }
-}
 
-if FFMPEG_LOCATION:
-    ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+    if FFMPEG_LOCATION:
+        ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
 
-cookies_file = COOKIES_FILES.get(platform)
-if cookies_file and os.path.exists(cookies_file):
-    ydl_opts["cookiefile"] = cookies_file
-if platform == "tiktok" and TIKTOK_PROXY:
-    ydl_opts["proxy"] = TIKTOK_PROXY
-if platform == "youtube" and YOUTUBE_PROXY:
-    ydl_opts["proxy"] = YOUTUBE_PROXY
+    cookies_file = COOKIES_FILES.get(platform)
+    if cookies_file and os.path.exists(cookies_file):
+        ydl_opts["cookiefile"] = cookies_file
+    if platform == "tiktok" and TIKTOK_PROXY:
+        ydl_opts["proxy"] = TIKTOK_PROXY
+    if platform == "youtube" and YOUTUBE_PROXY:
+        ydl_opts["proxy"] = YOUTUBE_PROXY
 
-# Для видео – принудительно конвертируем в MP4
-if quality not in ("q_audio", "q_audio_orig"):
-    ydl_opts.setdefault("postprocessors", []).append({
-        "key": "FFmpegVideoConvertor",
-        "preferedformat": "mp4",
-    })
+    # Для видео – принудительно конвертируем в MP4
+    if quality not in ("q_audio", "q_audio_orig"):
+        ydl_opts.setdefault("postprocessors", []).append({
+            "key": "FFmpegVideoConvertor",
+            "preferedformat": "mp4",
+        })
 
     def run_download():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -336,7 +336,6 @@ if quality not in ("q_audio", "q_audio_orig"):
         pending_urls.pop(user_id, None)
         pending_platforms.pop(user_id, None)
         pending_formats.pop(user_id, None)
-
 
 async def handle_ping(request):
     return web.Response(text="Bot is alive")
