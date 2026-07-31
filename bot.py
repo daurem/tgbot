@@ -106,14 +106,6 @@ def detect_platform(url: str) -> str | None:
 
 
 def probe_formats(url: str, platform: str) -> list[int]:
-    "extractor_args": {
-    "youtube": [
-        "player_client=android,web",
-        # Новый правильный синтаксис
-        "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
-         ]
-     }
-    
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -121,10 +113,12 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "noplaylist": True,
         "format": "best",
         "extractor_args": {
-            "youtube": extractor_args
+            "youtube": [
+                "player_client=android,web",
+                "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+            ]
         }
     }
-    
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
         ydl_opts["cookiefile"] = cookies_file
