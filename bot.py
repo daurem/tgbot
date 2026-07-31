@@ -91,11 +91,9 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        # Убрали "format": "best" – теперь ошибка "Requested format is not available" не возникает
         "extractor_args": {
             "youtube": [
-                "player_client=android,web",
-                "pot_provider=http://127.0.0.1:4416"
+                "pot_provider=http://127.0.0.1:4416"   # только pot_provider, без player_client
             ]
         }
     }
@@ -237,7 +235,6 @@ async def handle_quality_choice(callback: CallbackQuery):
         "no_warnings": True,
         "extractor_args": {
             "youtube": [
-                "player_client=android,web",
                 "pot_provider=http://127.0.0.1:4416"
             ]
         }
