@@ -18,7 +18,12 @@ from aiohttp import web
 import yt_dlp
 
 # ==== НАСТРОЙКИ ====
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8737695772:AAE_-i3wnlvoOE3CCcKdx2uqJSHKwsP9eB8")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError(
+        "Не задана переменная окружения BOT_TOKEN. "
+        "Установи её на сервере (Render -> Environment) и не храни токен в коде."
+    )
 DOWNLOAD_DIR = "downloads"
 
 LOCAL_API_URL = os.environ.get("LOCAL_BOT_API_URL")
@@ -37,9 +42,19 @@ COOKIES_FILES = {
 }
 
 TIKTOK_PROXY = os.environ.get("TIKTOK_PROXY", "")
+YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
+
+# Диагностика при старте: сразу видно в логах Render, подхватились ли куки
+for _platform, _fname in COOKIES_FILES.items():
+    if os.path.exists(_fname):
+        logging.info(f"[cookies] {_platform}: файл {_fname} найден ({os.path.getsize(_fname)} байт)")
+    else:
+        logging.warning(f"[cookies] {_platform}: файл {_fname} НЕ найден рядом со скриптом")
+if YOUTUBE_PROXY:
+    logging.info("[proxy] YOUTUBE_PROXY задан, буду использовать прокси для YouTube")
 
 from aiogram.client.telegram import TelegramAPIServer
 
@@ -85,6 +100,8 @@ def probe_formats(url: str, platform: str) -> list[int]:
         ydl_opts["cookiefile"] = cookies_file
     if platform == "tiktok" and TIKTOK_PROXY:
         ydl_opts["proxy"] = TIKTOK_PROXY
+    if platform == "youtube" and YOUTUBE_PROXY:
+        ydl_opts["proxy"] = YOUTUBE_PROXY
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -161,7 +178,14 @@ async def handle_link(message: Message):
     except Exception as e:
         logging.exception("Ошибка при получении форматов")
         note = ""
-        if platform == "tiktok":
+        if platform == "youtube" and "Sign in to confirm" in str(e):
+            note = (
+                "\n\nYouTube требует подтверждения, что это не бот. Обычно причина — "
+                "IP хостинга (Render/Railway и т.п. в чёрных списках Google), а не сами куки. "
+                f"Проверь, что файл {COOKIES_FILES['youtube']} свежий и лежит рядом со скриптом, "
+                "и при необходимости задай YOUTUBE_PROXY (резидентный/мобильный прокси)."
+            )
+        elif platform == "tiktok":
             note = (
                 "\n\nПохоже, TikTok недоступен без прокси/VPN (это блокировка на уровне "
                 "провайдера в Узбекистане, а не проблема бота). Задай TIKTOK_PROXY в коде "
@@ -219,6 +243,8 @@ async def handle_quality_choice(callback: CallbackQuery):
         ydl_opts["cookiefile"] = cookies_file
     if platform == "tiktok" and TIKTOK_PROXY:
         ydl_opts["proxy"] = TIKTOK_PROXY
+    if platform == "youtube" and YOUTUBE_PROXY:
+        ydl_opts["proxy"] = YOUTUBE_PROXY
 
     # Для видео – принудительно конвертируем в MP4 (для телефонов)
     if quality not in ("q_audio", "q_audio_orig"):
