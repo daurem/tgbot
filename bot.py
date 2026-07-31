@@ -106,10 +106,13 @@ def detect_platform(url: str) -> str | None:
 
 
 def probe_formats(url: str, platform: str) -> list[int]:
-    extractor_args = [
+    "extractor_args": {
+    "youtube": [
         "player_client=android,web",
-        f"pot_provider=http://127.0.0.1:4416",
-    ]
+        # Новый правильный синтаксис
+        "youtubepot-bgutilhttp:base_url=http://127.0.0.1:4416"
+         ]
+     }
     
     ydl_opts = {
         "quiet": True,
