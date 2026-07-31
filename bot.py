@@ -91,9 +91,10 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
+        "format": "bestvideo+bestaudio",  # явно указываем формат
         "extractor_args": {
             "youtube": [
-                "pot_provider=http://127.0.0.1:4416"   # только pot_provider, без player_client
+                "pot_provider=http://127.0.0.1:4416"
             ]
         }
     }
