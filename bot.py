@@ -106,8 +106,6 @@ def detect_platform(url: str) -> str | None:
 
 
 def probe_formats(url: str, platform: str) -> list[int]:
-    # === ФОРМИРУЕМ ПАРАМЕТРЫ ДЛЯ YT-DLP ===
-    # Используем список строк для extractor_args — это стандартный способ
     extractor_args = [
         "player_client=android,web",
         f"pot_provider=http://127.0.0.1:4416",
@@ -118,6 +116,7 @@ def probe_formats(url: str, platform: str) -> list[int]:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
+        "format": "best",
         "extractor_args": {
             "youtube": extractor_args
         }
@@ -130,9 +129,6 @@ def probe_formats(url: str, platform: str) -> list[int]:
         ydl_opts["proxy"] = TIKTOK_PROXY
     if platform == "youtube" and YOUTUBE_PROXY:
         ydl_opts["proxy"] = YOUTUBE_PROXY
-
-    # Отладка: выведем опции (убрать после отладки)
-    logging.debug(f"[probe] ydl_opts: {ydl_opts}")
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
