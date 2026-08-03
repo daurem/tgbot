@@ -46,6 +46,10 @@ COOKIES_FILES = {
 TIKTOK_PROXY = os.environ.get("TIKTOK_PROXY", "")
 YOUTUBE_PROXY = os.environ.get("YOUTUBE_PROXY", "")
 
+# aria2c качает несколькими соединениями параллельно — заметно быстрее обычного
+# скачивания yt-dlp. Требует установленного бинарника aria2c на сервере.
+USE_ARIA2C = os.environ.get("USE_ARIA2C", "0") == "1"
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 
@@ -63,9 +67,9 @@ from aiogram.client.telegram import TelegramAPIServer
 if LOCAL_API_URL:
     local_server = TelegramAPIServer.from_base(LOCAL_API_URL)
     session = AiohttpSession(api=local_server)
-    bot = Bot(token=BOT_TOKEN, session=session)
+    bot = Bot(token=BOT_TOKEN, session=session, timeout=300)   # <-- Добавлен таймаут
 else:
-    bot = Bot(token=BOT_TOKEN)
+    bot = Bot(token=BOT_TOKEN, timeout=300)                    # <-- Добавлен таймаут
 
 dp = Dispatcher()
 
@@ -73,6 +77,7 @@ pending_urls: dict[int, str] = {}
 pending_platforms: dict[int, str] = {}
 pending_formats: dict[int, list[int]] = {}
 pending_quality: dict[int, str] = {}  # хранит выбор качества, пока ждём выбор соотношения сторон
+pending_ratio: dict[int, str] = {}  # хранит callback_data выбранного соотношения, пока ждём выбор скорости
 
 PLATFORM_PATTERNS = {
     "youtube": re.compile(r"(youtube\.com|youtu\.be)"),
@@ -157,6 +162,13 @@ def build_aspect_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def build_speed_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚡ Быстро (без обработки)", callback_data="sp_fast")],
+        [InlineKeyboardButton(text="✨ Улучшить качество (дольше)", callback_data="sp_enhance")],
+    ])
+
+
 def format_for_quality(quality: str) -> dict:
     if quality == "q_best":
         # Принудительно H.264 + m4a для телефонов
@@ -184,23 +196,31 @@ def is_audio_quality(quality: str) -> bool:
     return quality in ("q_audio", "q_audio_orig")
 
 
-MAX_ENHANCE_SECONDS = int(os.environ.get("MAX_ENHANCE_SECONDS", "240"))  # видео длиннее — без тяжёлых фильтров
-processing_lock = asyncio.Semaphore(1)  # на free-тарифе (512MB) обработка идёт строго по одной задаче
+MAX_ENHANCE_SECONDS = int(os.environ.get("MAX_ENHANCE_SECONDS", "240"))  # видео длиннее — без денойза
+ENABLE_DENOISE = os.environ.get("ENABLE_DENOISE", "0") == "1"  # denoise — самый тяжёлый по CPU фильтр, по умолчанию выкл
+processing_lock = asyncio.Semaphore(1)  # на free-тарифе (512MB / 0.1 vCPU) обработка идёт строго по одной задаче
 
 
-async def process_video(input_path: str, ratio: tuple[int, int] | None, duration: float | None) -> str:
+async def process_video(
+    input_path: str,
+    ratio: tuple[int, int] | None,
+    duration: float | None,
+    enhance: bool = True,
+) -> str:
     """
-    Единый проход через ffmpeg:
-    1) если задано соотношение сторон — обрезает кадр по центру под него;
-    2) если после обрезки высота видео меньше 720p — апскейлит до 720p
-       (алгоритм lanczos, без уменьшения, если разрешение уже выше);
-    3) слегка повышает резкость и контраст/насыщенность.
+    Единый проход через ffmpeg. Если enhance=True — крoп (если задан) +
+    апскейл/резкость/денойз (см. ниже). Если enhance=False — только кроп
+    под нужный формат, без дополнительных фильтров (быстрый режим): кроп всё
+    равно обязателен для изменения соотношения сторон, но лишняя обработка
+    пропускается.
 
-    Настройки специально облегчены под бесплатный тариф Render (512MB RAM):
-    preset=veryfast вместо medium, апскейл до 720p вместо 1080p, ffmpeg
-    ограничен 1 потоком, а самый прожорливый по памяти фильтр (hqdn3d)
-    применяется только к коротким видео. Для длинных роликов (см.
-    MAX_ENHANCE_SECONDS) денойз пропускается, чтобы не словить OOM.
+    Render Free — это 512MB RAM И ВСЕГО 0.1 vCPU (десятая часть ядра), так что
+    узкое место — именно CPU, а не память. Поэтому:
+    - preset=ultrafast (самый быстрый режим x264, единственный по-настоящему
+      весомый рычаг скорости на урезанном CPU);
+    - hqdn3d (денойз, самый тяжёлый фильтр) по умолчанию ВЫКЛЮЧЕН
+      (включается через ENABLE_DENOISE=1, если важнее качество, а не скорость);
+    - апскейл ограничен 720p, а не 1080p — меньше пикселей = меньше работы.
 
     Это классическое ffmpeg-улучшение (sharpen + upscale, опционально denoise),
     а не нейросетевой апскейл (Real-ESRGAN и т.п.) — оно чистит артефакты сжатия
@@ -215,12 +235,13 @@ async def process_video(input_path: str, ratio: tuple[int, int] | None, duration
     if ratio is not None:
         a, b = ratio
         filters.append(f"crop='min(iw,ih*{a}/{b})':'min(ih,iw*{b}/{a})'")
-    if duration is None or duration <= MAX_ENHANCE_SECONDS:
-        filters.append("hqdn3d=1.0:1.0:4:4")
-    filters.append("scale=-2:'if(lt(ih,720),720,ih)':flags=lanczos")
-    filters.append("unsharp=5:5:0.6:5:5:0.0")
-    filters.append("eq=contrast=1.03:saturation=1.06")
-    vf = ",".join(filters)
+    if enhance:
+        if ENABLE_DENOISE and (duration is None or duration <= MAX_ENHANCE_SECONDS):
+            filters.append("hqdn3d=1.0:1.0:4:4")
+        filters.append("scale=-2:'if(lt(ih,720),720,ih)':flags=lanczos")
+        filters.append("unsharp=5:5:0.6:5:5:0.0")
+        filters.append("eq=contrast=1.03:saturation=1.06")
+    vf = ",".join(filters) if filters else "null"
 
     cmd = [
         FFMPEG_BIN,
@@ -228,9 +249,10 @@ async def process_video(input_path: str, ratio: tuple[int, int] | None, duration
         "-i", input_path,
         "-vf", vf,
         "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "20",
+        "-preset", "ultrafast",
+        "-crf", "23",
         "-threads", "1",
+        "-movflags", "+faststart",
         "-c:a", "copy",
         output_path,
     ]
@@ -253,15 +275,18 @@ async def process_video(input_path: str, ratio: tuple[int, int] | None, duration
 
 @dp.message(Command("start"))
 async def start(message: Message):
-    limit_note = (
-        "Лимит на размер файла снят (локальный сервер, до 2000 МБ)."
-        if LOCAL_API_URL
-        else "Внимание: без локального Bot API сервера действует лимит Telegram в 50 МБ на файл."
+    # Расширенный ответ с описанием возможностей бота
+    text = (
+        "👋 Привет! Я бот для скачивания видео с YouTube, Instagram и TikTok.\n\n"
+        "📥 Просто пришли мне ссылку на видео, и я предложу:\n"
+        "• Выбор качества (вплоть до оригинального)\n"
+        "• Изменение соотношения сторон (1:1, 4:3, 16:9 и др.)\n"
+        "• Быстрый режим (только обрезка) или улучшение качества (апскейл, резкость)\n"
+        "• Скачивание аудио (оригинал или MP3 320 kbps)\n\n"
+        "⚠️ Внимание: без локального Bot API сервера действует лимит Telegram на файлы до 50 МБ.\n"
+        "Если видео больше, попробуйте выбрать более низкое качество."
     )
-    await message.answer(
-        "Привет! Пришли ссылку на видео с YouTube, Instagram или TikTok, "
-        "и я покажу доступные варианты скачивания.\n\n" + limit_note
-    )
+    await message.answer(text)
 
 
 @dp.message(F.text)
@@ -330,7 +355,7 @@ async def handle_quality_choice(callback: CallbackQuery):
     if is_audio_quality(quality):
         # для аудио соотношение сторон не нужно — сразу качаем
         pending_quality.pop(user_id, None)
-        await run_download_and_send(callback, quality, ratio=None)
+        await run_download_and_send(callback, quality, ratio=None, enhance=False)
     else:
         # для видео сначала спрашиваем нужное соотношение сторон
         pending_quality[user_id] = quality
@@ -351,12 +376,33 @@ async def handle_aspect_choice(callback: CallbackQuery):
         return
 
     await callback.answer()
-    _label, ratio = ASPECT_RATIOS.get(callback.data, ("Оригинал", None))
-    await run_download_and_send(callback, quality, ratio=ratio)
+    pending_ratio[user_id] = callback.data
+    await callback.message.edit_text(
+        "Быстро отправить как есть, или обработать и улучшить качество?",
+        reply_markup=build_speed_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("sp_"))
+async def handle_speed_choice(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    url = pending_urls.get(user_id)
+    platform = pending_platforms.get(user_id)
+    quality = pending_quality.get(user_id)
+    ratio_key = pending_ratio.get(user_id)
+
+    if not url or not platform or not quality or not ratio_key:
+        await callback.answer("Сессия устарела, пришли ссылку заново.", show_alert=True)
+        return
+
+    await callback.answer()
+    _label, ratio = ASPECT_RATIOS.get(ratio_key, ("Оригинал", None))
+    enhance = callback.data == "sp_enhance"
+    await run_download_and_send(callback, quality, ratio=ratio, enhance=enhance)
 
 
 async def run_download_and_send(
-    callback: CallbackQuery, quality: str, ratio: tuple[int, int] | None
+    callback: CallbackQuery, quality: str, ratio: tuple[int, int] | None, enhance: bool
 ):
     user_id = callback.from_user.id
     url = pending_urls.get(user_id)
@@ -368,7 +414,7 @@ async def run_download_and_send(
 
     async with processing_lock:
         status_msg = await callback.message.edit_text("Скачиваю, подожди немного...")
-        await _run_download_and_send_inner(callback, status_msg, user_id, url, platform, quality, ratio)
+        await _run_download_and_send_inner(callback, status_msg, user_id, url, platform, quality, ratio, enhance)
 
 
 async def _run_download_and_send_inner(
@@ -379,6 +425,7 @@ async def _run_download_and_send_inner(
     platform: str,
     quality: str,
     ratio: tuple[int, int] | None,
+    enhance: bool,
 ):
     opts = format_for_quality(quality)
 
@@ -397,6 +444,10 @@ async def _run_download_and_send_inner(
 
     if FFMPEG_LOCATION:
         ydl_opts["ffmpeg_location"] = FFMPEG_LOCATION
+
+    if USE_ARIA2C:
+        ydl_opts["external_downloader"] = "aria2c"
+        ydl_opts["external_downloader_args"] = {"aria2c": ["-x", "16", "-s", "16", "-k", "1M"]}
 
     cookies_file = COOKIES_FILES.get(platform)
     if cookies_file and os.path.exists(cookies_file):
@@ -444,12 +495,18 @@ async def _run_download_and_send_inner(
 
         send_path = filepath
 
-        # Для видео всегда прогоняем через ffmpeg: обрезка под нужный формат
-        # (если выбран не "Оригинал") + улучшение качества (denoise/sharpen/upscale)
-        if quality not in ("q_audio", "q_audio_orig"):
-            await status_msg.edit_text("Обрабатываю видео (формат + улучшение качества)...")
+        # Для видео: если выбран "Быстро" и формат "Оригинал" — ffmpeg вообще не
+        # запускаем, отправляем файл как скачался (максимально быстро).
+        # Если выбран "Быстро", но нужен кроп под формат — кроп всё равно
+        # обязателен (без него сторона не изменится), но без доп. фильтров.
+        # Если выбран "Улучшить" — полный проход с апскейлом/резкостью/денойзом.
+        if quality not in ("q_audio", "q_audio_orig") and (enhance or ratio is not None):
+            if not enhance:
+                await status_msg.edit_text("Меняю формат...")
+            else:
+                await status_msg.edit_text("Обрабатываю видео (формат + улучшение качества)...")
             try:
-                cropped_path = await process_video(filepath, ratio, duration)
+                cropped_path = await process_video(filepath, ratio, duration, enhance=enhance)
                 send_path = cropped_path
             except Exception as e:
                 logging.exception("Ошибка при обработке видео")
@@ -472,10 +529,11 @@ async def _run_download_and_send_inner(
             )
         else:
             await status_msg.edit_text("Загружаю файл в Telegram...")
+            # Добавляем request_timeout=300 для увеличения таймаута
             if quality in ("q_audio", "q_audio_orig"):
-                await callback.message.answer_audio(FSInputFile(send_path), title=title)
+                await callback.message.answer_audio(FSInputFile(send_path), title=title, request_timeout=300)
             else:
-                await callback.message.answer_video(FSInputFile(send_path), caption=title)
+                await callback.message.answer_video(FSInputFile(send_path), caption=title, request_timeout=300)
             await status_msg.delete()
 
     except Exception as e:
@@ -490,6 +548,7 @@ async def _run_download_and_send_inner(
         pending_platforms.pop(user_id, None)
         pending_formats.pop(user_id, None)
         pending_quality.pop(user_id, None)
+        pending_ratio.pop(user_id, None)
 
 
 async def handle_ping(request):
