@@ -83,9 +83,16 @@ PLATFORM_PATTERNS = {
 # Соотношения сторон: callback_data -> (подпись, (w, h) или None для "как есть")
 ASPECT_RATIOS: dict[str, tuple[str, tuple[int, int] | None]] = {
     "ar_orig": ("Оригинал", None),
-    "ar_1x1": ("1:1 (квадрат)", (1, 1)),
+    "ar_1x1": ("1:1", (1, 1)),
     "ar_4x3": ("4:3", (4, 3)),
-    "ar_9x16": ("9:16 (сторис/шортс)", (9, 16)),
+    "ar_3x4": ("3:4", (3, 4)),
+    "ar_16x9": ("16:9", (16, 9)),
+    "ar_9x16": ("9:16", (9, 16)),
+    "ar_4x5": ("4:5", (4, 5)),
+    "ar_5x4": ("5:4", (5, 4)),
+    "ar_3x2": ("3:2", (3, 2)),
+    "ar_2x3": ("2:3", (2, 3)),
+    "ar_21x9": ("21:9", (21, 9)),
 }
 
 
@@ -138,10 +145,15 @@ def build_quality_keyboard(heights: list[int]) -> InlineKeyboardMarkup:
 
 
 def build_aspect_keyboard() -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton(text=label, callback_data=key)]
-        for key, (label, _) in ASPECT_RATIOS.items()
-    ]
+    items = list(ASPECT_RATIOS.items())
+    # "Оригинал" отдельной полной строкой, остальные — по 2 в ряд
+    buttons = [[InlineKeyboardButton(text=items[0][1][0], callback_data=items[0][0])]]
+    rest = items[1:]
+    for i in range(0, len(rest), 2):
+        row = rest[i:i + 2]
+        buttons.append(
+            [InlineKeyboardButton(text=label, callback_data=key) for key, (label, _) in row]
+        )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -172,26 +184,53 @@ def is_audio_quality(quality: str) -> bool:
     return quality in ("q_audio", "q_audio_orig")
 
 
-async def apply_aspect_ratio(input_path: str, ratio: tuple[int, int]) -> str:
-    """
-    Обрезает видео по центру до нужного соотношения сторон w:h с помощью ffmpeg
-    и возвращает путь к новому файлу. Аудиодорожка копируется без перекодирования.
-    """
-    a, b = ratio
-    root, _ext = os.path.splitext(input_path)
-    output_path = f"{root}_ar{a}x{b}.mp4"
+MAX_ENHANCE_SECONDS = int(os.environ.get("MAX_ENHANCE_SECONDS", "240"))  # видео длиннее — без тяжёлых фильтров
+processing_lock = asyncio.Semaphore(1)  # на free-тарифе (512MB) обработка идёт строго по одной задаче
 
-    # Ширина/высота вычисляются так, чтобы вписаться в исходный кадр по центру
-    crop_filter = f"crop='min(iw,ih*{a}/{b})':'min(ih,iw*{b}/{a})'"
+
+async def process_video(input_path: str, ratio: tuple[int, int] | None, duration: float | None) -> str:
+    """
+    Единый проход через ffmpeg:
+    1) если задано соотношение сторон — обрезает кадр по центру под него;
+    2) если после обрезки высота видео меньше 720p — апскейлит до 720p
+       (алгоритм lanczos, без уменьшения, если разрешение уже выше);
+    3) слегка повышает резкость и контраст/насыщенность.
+
+    Настройки специально облегчены под бесплатный тариф Render (512MB RAM):
+    preset=veryfast вместо medium, апскейл до 720p вместо 1080p, ffmpeg
+    ограничен 1 потоком, а самый прожорливый по памяти фильтр (hqdn3d)
+    применяется только к коротким видео. Для длинных роликов (см.
+    MAX_ENHANCE_SECONDS) денойз пропускается, чтобы не словить OOM.
+
+    Это классическое ffmpeg-улучшение (sharpen + upscale, опционально denoise),
+    а не нейросетевой апскейл (Real-ESRGAN и т.п.) — оно чистит артефакты сжатия
+    и подтягивает мелкое разрешение, но не "дорисовывает" детали, которых не было
+    в исходнике. Аудио копируется без перекодирования.
+    """
+    root, _ext = os.path.splitext(input_path)
+    suffix = f"_ar{ratio[0]}x{ratio[1]}" if ratio else "_enhanced"
+    output_path = f"{root}{suffix}.mp4"
+
+    filters = []
+    if ratio is not None:
+        a, b = ratio
+        filters.append(f"crop='min(iw,ih*{a}/{b})':'min(ih,iw*{b}/{a})'")
+    if duration is None or duration <= MAX_ENHANCE_SECONDS:
+        filters.append("hqdn3d=1.0:1.0:4:4")
+    filters.append("scale=-2:'if(lt(ih,720),720,ih)':flags=lanczos")
+    filters.append("unsharp=5:5:0.6:5:5:0.0")
+    filters.append("eq=contrast=1.03:saturation=1.06")
+    vf = ",".join(filters)
 
     cmd = [
         FFMPEG_BIN,
         "-y",
         "-i", input_path,
-        "-vf", crop_filter,
+        "-vf", vf,
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", "20",
+        "-threads", "1",
         "-c:a", "copy",
         output_path,
     ]
@@ -323,8 +362,24 @@ async def run_download_and_send(
     url = pending_urls.get(user_id)
     platform = pending_platforms.get(user_id)
 
-    status_msg = await callback.message.edit_text("Скачиваю, подожди немного...")
+    if processing_lock.locked():
+        await callback.message.edit_text("В очереди — бот сейчас обрабатывает другое видео, подожди немного...")
+    status_msg = None
 
+    async with processing_lock:
+        status_msg = await callback.message.edit_text("Скачиваю, подожди немного...")
+        await _run_download_and_send_inner(callback, status_msg, user_id, url, platform, quality, ratio)
+
+
+async def _run_download_and_send_inner(
+    callback: CallbackQuery,
+    status_msg: Message,
+    user_id: int,
+    url: str,
+    platform: str,
+    quality: str,
+    ratio: tuple[int, int] | None,
+):
     opts = format_for_quality(quality)
 
     ydl_opts = {
@@ -363,7 +418,8 @@ async def run_download_and_send(
             info = ydl.extract_info(url, download=True)
             video_id = info.get("id", "video")
             title = info.get("title", "video")
-            return video_id, title
+            duration = info.get("duration")
+            return video_id, title, duration
 
     def find_downloaded_file(video_id: str) -> str | None:
         pattern = f"{DOWNLOAD_DIR}/{video_id}_{user_id}.*"
@@ -379,7 +435,7 @@ async def run_download_and_send(
     filepath = None
     cropped_path = None
     try:
-        video_id, title = await asyncio.to_thread(run_download)
+        video_id, title, duration = await asyncio.to_thread(run_download)
         filepath = find_downloaded_file(video_id)
 
         if not filepath:
@@ -388,17 +444,18 @@ async def run_download_and_send(
 
         send_path = filepath
 
-        # Меняем соотношение сторон, если это видео и выбрано не "Оригинал"
-        if ratio is not None and quality not in ("q_audio", "q_audio_orig"):
-            await status_msg.edit_text("Меняю соотношение сторон...")
+        # Для видео всегда прогоняем через ffmpeg: обрезка под нужный формат
+        # (если выбран не "Оригинал") + улучшение качества (denoise/sharpen/upscale)
+        if quality not in ("q_audio", "q_audio_orig"):
+            await status_msg.edit_text("Обрабатываю видео (формат + улучшение качества)...")
             try:
-                cropped_path = await apply_aspect_ratio(filepath, ratio)
+                cropped_path = await process_video(filepath, ratio, duration)
                 send_path = cropped_path
             except Exception as e:
-                logging.exception("Ошибка при обрезке видео")
+                logging.exception("Ошибка при обработке видео")
                 await status_msg.edit_text(
-                    f"Не удалось изменить соотношение сторон: {e}\n"
-                    "Отправляю видео в оригинальном соотношении."
+                    f"Не удалось обработать видео: {e}\n"
+                    "Отправляю видео без изменений."
                 )
                 send_path = filepath
 
