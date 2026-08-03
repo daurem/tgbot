@@ -184,9 +184,14 @@ def get_video_info(file_path: str) -> Dict:
         return {"size": os.path.getsize(file_path), "error": str(e)}
 
 async def convert_video_format(input_path: str, target_ext: str) -> Optional[str]:
-    """Конвертирует видео в указанный контейнер с максимальной совместимостью."""
+    """
+    Конвертирует видео в указанный контейнер с максимальной совместимостью.
+    Возвращает путь к новому файлу (с суффиксом _converted).
+    """
     base, _ = os.path.splitext(input_path)
-    output_path = f"{base}.{target_ext}"
+    output_path = f"{base}_converted.{target_ext}"
+    if os.path.exists(output_path):
+        os.remove(output_path)
 
     if target_ext == "mp4":
         vcodec = "libx264"
@@ -417,8 +422,8 @@ async def download_and_send(callback: CallbackQuery, data: dict):
             user_data.pop(user_id, None)
             return
 
-        # Принудительно перекодируем в выбранный контейнер с гарантированными кодеками для совместимости
-        if container in ("mp4", "webm"):
+        # Принудительное перекодирование для видео (не для аудио)
+        if quality not in ("q_audio", "q_audio_orig") and container in ("mp4", "webm"):
             await status.edit_text(f"🔄 Конвертирую в {container.upper()}...")
             new_path = await convert_video_format(filepath, container)
             if new_path and os.path.exists(new_path):
@@ -469,7 +474,7 @@ async def download_and_send(callback: CallbackQuery, data: dict):
                 await callback.message.answer_video(
                     FSInputFile(filepath),
                     caption=info_text,
-                    supports_streaming=True,  # <-- ДОБАВЛЕНО для быстрого начала воспроизведения
+                    supports_streaming=True,
                     request_timeout=300,
                     parse_mode="HTML"
                 )
