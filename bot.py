@@ -5,7 +5,7 @@ import os
 import re
 import json
 import subprocess
-import html  # <-- ДОБАВЛЕНО для экранирования
+import html
 from typing import Optional, Dict, Any, Tuple, List
 
 from aiogram import Bot, Dispatcher, F
@@ -45,7 +45,7 @@ COOKIES_FILES = {
     "tiktok": "cookies_tiktok.txt",
 }
 TIKTOK_PROXY = os.environ.get("TIKTOK_PROXY", "")
-INSTAGRAM_PROXY = os.environ.get("INSTAGRAM_PROXY", "")  # опционально
+INSTAGRAM_PROXY = os.environ.get("INSTAGRAM_PROXY", "")
 USE_ARIA2C = os.environ.get("USE_ARIA2C", "0") == "1"
 
 logging.basicConfig(level=logging.INFO)
@@ -66,10 +66,10 @@ else:
     bot = Bot(token=BOT_TOKEN, timeout=300)
 dp = Dispatcher()
 
-# Хранилище данных пользователей (только для ссылок)
+# Хранилище данных пользователей
 user_data: Dict[int, Dict[str, Any]] = {}
 
-# Регулярки только для Instagram и TikTok
+# Регулярки для Instagram и TikTok
 PLATFORM_PATTERNS = {
     "instagram": re.compile(r"instagram\.com"),
     "tiktok": re.compile(r"tiktok\.com"),
@@ -86,9 +86,6 @@ def detect_platform(url: str) -> Optional[str]:
     return None
 
 def probe_formats(url: str, platform: str) -> Tuple[List[int], Dict, List[str]]:
-    """
-    Возвращает (heights, video_info, available_containers)
-    """
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -113,7 +110,6 @@ def probe_formats(url: str, platform: str) -> Tuple[List[int], Dict, List[str]]:
         reverse=True,
     )
     containers = sorted({f.get("ext") for f in formats if f.get("ext") and f.get("vcodec") != "none"})
-    # Приоритет: mp4, webm, остальные
     preferred = ["mp4", "webm"]
     containers_sorted = [c for c in preferred if c in containers] + [c for c in containers if c not in preferred]
 
@@ -154,7 +150,6 @@ def format_duration(seconds: int) -> str:
     return f"{m}:{s:02d}"
 
 def get_video_info(file_path: str) -> Dict:
-    """Использует ffprobe для получения информации о файле."""
     cmd = [
         FFPROBE_BIN,
         "-v", "quiet",
@@ -189,18 +184,19 @@ def get_video_info(file_path: str) -> Dict:
         return {"size": os.path.getsize(file_path), "error": str(e)}
 
 async def convert_video_format(input_path: str, target_ext: str) -> Optional[str]:
-    """Конвертирует видео в указанный контейнер (mp4 или webm)."""
+    """Конвертирует видео в указанный контейнер с максимальной совместимостью."""
     base, _ = os.path.splitext(input_path)
     output_path = f"{base}.{target_ext}"
 
     if target_ext == "mp4":
         vcodec = "libx264"
         acodec = "aac"
+        extra_args = ["-profile:v", "baseline", "-level", "3.0", "-movflags", "+faststart"]
     elif target_ext == "webm":
         vcodec = "libvpx-vp9"
         acodec = "libopus"
+        extra_args = []
     else:
-        # Если формат уже такой же, просто копируем (но обычно мы не вызываем)
         return None
 
     cmd = [
@@ -211,8 +207,8 @@ async def convert_video_format(input_path: str, target_ext: str) -> Optional[str
         "-c:a", acodec,
         "-preset", "ultrafast",
         "-threads", "1",
-        output_path
-    ]
+    ] + extra_args + [output_path]
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -229,7 +225,6 @@ async def convert_video_format(input_path: str, target_ext: str) -> Optional[str
         return None
 
 def build_ydl_opts(quality: str, container: str, platform: str, user_id: int) -> Dict:
-    """Формирует опции для yt-dlp с учётом качества и контейнера."""
     if quality == "q_best":
         fmt_str = f"bestvideo[ext={container}]+bestaudio[ext=m4a]/best[ext={container}]/best"
     elif quality.startswith("q_") and quality[2:].isdigit():
@@ -259,7 +254,6 @@ def build_ydl_opts(quality: str, container: str, platform: str, user_id: int) ->
             }]
     else:
         opts["format"] = fmt_str
-        # Указываем желаемый контейнер
         opts["merge_output_format"] = container
         opts["postprocessors"] = [{
             "key": "FFmpegVideoConvertor",
@@ -282,9 +276,6 @@ def build_ydl_opts(quality: str, container: str, platform: str, user_id: int) ->
     return opts
 
 async def download_video(url: str, platform: str, quality: str, container: str, user_id: int) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Скачивает видео, возвращает путь и название.
-    """
     opts = build_ydl_opts(quality, container, platform, user_id)
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -317,7 +308,7 @@ async def start(message: Message):
         "⚠️ <i>Лимит Telegram на файлы – 50 МБ (без локального Bot API).</i>\n"
         "Если видео приватное – добавь файл cookies_instagram.txt или cookies_tiktok.txt рядом со скриптом."
     )
-    await message.answer(text, parse_mode="HTML")  # FIX
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message(F.text)
 async def handle_link(message: Message):
@@ -339,7 +330,6 @@ async def handle_link(message: Message):
         await status.edit_text(f"❌ Не удалось получить информацию: {e}" + note)
         return
 
-    # Сохраняем данные
     user_data[message.from_user.id] = {
         "url": url,
         "platform": platform,
@@ -349,7 +339,6 @@ async def handle_link(message: Message):
         "state": "awaiting_quality"
     }
 
-    # Экранируем пользовательские данные
     title = html.escape(video_info['title'])
     uploader = html.escape(video_info['uploader'])
     heights_str = ', '.join([f'{h}p' for h in heights])
@@ -366,7 +355,7 @@ async def handle_link(message: Message):
     await status.edit_text(
         info_text + "\n\nВыбери качество:",
         reply_markup=build_quality_keyboard(heights),
-        parse_mode="HTML"  # FIX
+        parse_mode="HTML"
     )
 
 @dp.callback_query(F.data.startswith("q_"))
@@ -384,7 +373,6 @@ async def handle_quality_choice(callback: CallbackQuery):
 
     containers = data.get("containers", [])
     if not containers:
-        # Если контейнеров нет (только аудио) – сразу переходим к скачиванию
         if quality in ("q_audio", "q_audio_orig"):
             data["container"] = "mp3" if quality == "q_audio" else "m4a"
             await download_and_send(callback, data)
@@ -405,13 +393,12 @@ async def handle_format_choice(callback: CallbackQuery):
         await callback.answer("Сессия устарела.", show_alert=True)
         return
 
-    container = callback.data[4:]  # убираем "fmt_"
+    container = callback.data[4:]
     await callback.answer()
     data["container"] = container
     await download_and_send(callback, data)
 
 async def download_and_send(callback: CallbackQuery, data: dict):
-    """Скачивание и отправка с информацией."""
     user_id = callback.from_user.id
     quality = data.get("quality")
     container = data.get("container", "mp4")
@@ -430,11 +417,8 @@ async def download_and_send(callback: CallbackQuery, data: dict):
             user_data.pop(user_id, None)
             return
 
-        # Если контейнер не совпадает с расширением файла, возможно, yt-dlp уже сконвертировал.
-        # Но если мы хотим принудительно конвертировать (например, если выбранный контейнер отличается от полученного),
-        # проверим расширение и при необходимости конвертируем.
-        ext = os.path.splitext(filepath)[1][1:].lower()
-        if ext != container and container in ("mp4", "webm"):
+        # Принудительно перекодируем в выбранный контейнер с гарантированными кодеками для совместимости
+        if container in ("mp4", "webm"):
             await status.edit_text(f"🔄 Конвертирую в {container.upper()}...")
             new_path = await convert_video_format(filepath, container)
             if new_path and os.path.exists(new_path):
@@ -443,7 +427,6 @@ async def download_and_send(callback: CallbackQuery, data: dict):
             else:
                 await status.edit_text("⚠️ Не удалось конвертировать, отправляю в исходном формате.")
 
-        # Получаем информацию о файле
         file_info = get_video_info(filepath)
         size_mb = file_info.get("size", 0) / (1024 * 1024)
         duration = file_info.get("duration", 0)
@@ -454,7 +437,7 @@ async def download_and_send(callback: CallbackQuery, data: dict):
         bitrate = file_info.get("bitrate", 0)
         bitrate_str = f"{bitrate//1000} kbps" if bitrate else "неизвестно"
 
-        title_esc = html.escape(title)  # FIX
+        title_esc = html.escape(title)
         info_text = (
             f"📄 <b>{title_esc}</b>\n"
             f"📦 Размер: {size_mb:.2f} МБ\n"
@@ -473,22 +456,29 @@ async def download_and_send(callback: CallbackQuery, data: dict):
             return
 
         await status.edit_text("📤 Загружаю в Telegram...")
-        if quality in ("q_audio", "q_audio_orig"):
-            await callback.message.answer_audio(
-                FSInputFile(filepath),
-                title=title,
-                caption=info_text,
-                request_timeout=300,
-                parse_mode="HTML"  # FIX
-            )
+        try:
+            if quality in ("q_audio", "q_audio_orig"):
+                await callback.message.answer_audio(
+                    FSInputFile(filepath),
+                    title=title,
+                    caption=info_text,
+                    request_timeout=300,
+                    parse_mode="HTML"
+                )
+            else:
+                await callback.message.answer_video(
+                    FSInputFile(filepath),
+                    caption=info_text,
+                    supports_streaming=True,  # <-- ДОБАВЛЕНО для быстрого начала воспроизведения
+                    request_timeout=300,
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logging.exception("Ошибка при отправке")
+            await status.edit_text(f"❌ Ошибка при отправке: {e}")
         else:
-            await callback.message.answer_video(
-                FSInputFile(filepath),
-                caption=info_text,
-                request_timeout=300,
-                parse_mode="HTML"  # FIX
-            )
-        await status.delete()
+            await status.delete()
+
         os.remove(filepath)
         user_data.pop(user_id, None)
 
