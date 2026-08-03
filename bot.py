@@ -21,6 +21,7 @@ from aiogram.types import (
 from aiogram.client.telegram import TelegramAPIServer
 from aiohttp import web
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
 # ==== НАСТРОЙКИ ====
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -184,10 +185,6 @@ def get_video_info(file_path: str) -> Dict:
         return {"size": os.path.getsize(file_path), "error": str(e)}
 
 async def convert_video_format(input_path: str, target_ext: str) -> Optional[str]:
-    """
-    Конвертирует видео в указанный контейнер с максимальной совместимостью.
-    Возвращает путь к новому файлу (с суффиксом _converted).
-    """
     base, _ = os.path.splitext(input_path)
     output_path = f"{base}_converted.{target_ext}"
     if os.path.exists(output_path):
@@ -327,6 +324,19 @@ async def handle_link(message: Message):
 
     try:
         heights, video_info, containers = await asyncio.to_thread(probe_formats, url, platform)
+    except DownloadError as e:
+        # Специфическая обработка ошибок yt-dlp
+        error_msg = str(e)
+        if "empty media response" in error_msg.lower() or "cookies" in error_msg.lower():
+            note = (
+                f"\n\n❌ Instagram требует авторизации для этого видео.\n"
+                f"👉 Добавь файл <b>cookies_instagram.txt</b> (экспортируй куки из браузера) в папку бота.\n"
+                f"Инструкция: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+            )
+            await status.edit_text(f"❌ Не удалось получить информацию: {e}" + note, parse_mode="HTML")
+        else:
+            await status.edit_text(f"❌ Ошибка при получении данных: {e}")
+        return
     except Exception as e:
         logging.exception("probe_formats error")
         note = ""
