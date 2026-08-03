@@ -5,6 +5,7 @@ import os
 import re
 import json
 import subprocess
+import html  # <-- ДОБАВЛЕНО для экранирования
 from typing import Optional, Dict, Any, Tuple, List
 
 from aiogram import Bot, Dispatcher, F
@@ -306,17 +307,17 @@ async def download_video(url: str, platform: str, quality: str, container: str, 
 @dp.message(Command("start"))
 async def start(message: Message):
     text = (
-        "👋 **Привет! Я скачиваю видео с Instagram и TikTok.**\n\n"
-        "📌 **Как это работает:**\n"
+        "👋 <b>Привет! Я скачиваю видео с Instagram и TikTok.</b>\n\n"
+        "📌 <b>Как это работает:</b>\n"
         "1. Отправь мне ссылку на видео с Instagram или TikTok.\n"
-        "2. Я покажу доступные **качества** – выбери нужное.\n"
-        "3. Затем выбери **формат** (контейнер) – MP4, WEBM и другие.\n"
-        "4. Я скачаю видео и пришлю его с **полной информацией**:\n"
+        "2. Я покажу доступные <b>качества</b> – выбери нужное.\n"
+        "3. Затем выбери <b>формат</b> (контейнер) – MP4, WEBM и другие.\n"
+        "4. Я скачаю видео и пришлю его с <b>полной информацией</b>:\n"
         "   размер, длительность, разрешение, кодеки и битрейт.\n\n"
-        "⚠️ *Лимит Telegram на файлы – 50 МБ (без локального Bot API).*\n"
+        "⚠️ <i>Лимит Telegram на файлы – 50 МБ (без локального Bot API).</i>\n"
         "Если видео приватное – добавь файл cookies_instagram.txt или cookies_tiktok.txt рядом со скриптом."
     )
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")  # FIX
 
 @dp.message(F.text)
 async def handle_link(message: Message):
@@ -348,12 +349,16 @@ async def handle_link(message: Message):
         "state": "awaiting_quality"
     }
 
+    # Экранируем пользовательские данные
+    title = html.escape(video_info['title'])
+    uploader = html.escape(video_info['uploader'])
+    heights_str = ', '.join([f'{h}p' for h in heights])
     info_text = (
-        f"📹 **{video_info['title']}**\n"
-        f"👤 Автор: {video_info['uploader']}\n"
+        f"📹 <b>{title}</b>\n"
+        f"👤 Автор: {uploader}\n"
         f"⏱ Длительность: {format_duration(video_info['duration'])}\n"
         f"👁 Просмотров: {video_info['view_count']}\n"
-        f"📐 Доступные разрешения: {', '.join([f'{h}p' for h in heights])}\n"
+        f"📐 Доступные разрешения: {heights_str}\n"
     )
     if containers:
         info_text += f"📦 Контейнеры: {', '.join(containers)}"
@@ -361,7 +366,7 @@ async def handle_link(message: Message):
     await status.edit_text(
         info_text + "\n\nВыбери качество:",
         reply_markup=build_quality_keyboard(heights),
-        parse_mode="Markdown"
+        parse_mode="HTML"  # FIX
     )
 
 @dp.callback_query(F.data.startswith("q_"))
@@ -449,8 +454,9 @@ async def download_and_send(callback: CallbackQuery, data: dict):
         bitrate = file_info.get("bitrate", 0)
         bitrate_str = f"{bitrate//1000} kbps" if bitrate else "неизвестно"
 
+        title_esc = html.escape(title)  # FIX
         info_text = (
-            f"📄 **{title}**\n"
+            f"📄 <b>{title_esc}</b>\n"
             f"📦 Размер: {size_mb:.2f} МБ\n"
             f"⏱ Длительность: {format_duration(int(duration))}\n"
             f"🖥 Разрешение: {width}x{height}\n"
@@ -468,9 +474,20 @@ async def download_and_send(callback: CallbackQuery, data: dict):
 
         await status.edit_text("📤 Загружаю в Telegram...")
         if quality in ("q_audio", "q_audio_orig"):
-            await callback.message.answer_audio(FSInputFile(filepath), title=title, caption=info_text, request_timeout=300, parse_mode="Markdown")
+            await callback.message.answer_audio(
+                FSInputFile(filepath),
+                title=title,
+                caption=info_text,
+                request_timeout=300,
+                parse_mode="HTML"  # FIX
+            )
         else:
-            await callback.message.answer_video(FSInputFile(filepath), caption=info_text, request_timeout=300, parse_mode="Markdown")
+            await callback.message.answer_video(
+                FSInputFile(filepath),
+                caption=info_text,
+                request_timeout=300,
+                parse_mode="HTML"  # FIX
+            )
         await status.delete()
         os.remove(filepath)
         user_data.pop(user_id, None)
