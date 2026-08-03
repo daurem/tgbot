@@ -35,6 +35,8 @@ if not FFMPEG_LOCATION:
     if os.path.isdir(_default_win_ffmpeg):
         FFMPEG_LOCATION = _default_win_ffmpeg
 
+FFMPEG_BIN = os.path.join(FFMPEG_LOCATION, "ffmpeg") if FFMPEG_LOCATION else "ffmpeg"
+
 COOKIES_FILES = {
     "youtube": "cookies_youtube.txt",
     "instagram": "cookies_instagram.txt",
@@ -70,11 +72,20 @@ dp = Dispatcher()
 pending_urls: dict[int, str] = {}
 pending_platforms: dict[int, str] = {}
 pending_formats: dict[int, list[int]] = {}
+pending_quality: dict[int, str] = {}  # хранит выбор качества, пока ждём выбор соотношения сторон
 
 PLATFORM_PATTERNS = {
     "youtube": re.compile(r"(youtube\.com|youtu\.be)"),
     "instagram": re.compile(r"instagram\.com"),
     "tiktok": re.compile(r"tiktok\.com"),
+}
+
+# Соотношения сторон: callback_data -> (подпись, (w, h) или None для "как есть")
+ASPECT_RATIOS: dict[str, tuple[str, tuple[int, int] | None]] = {
+    "ar_orig": ("Оригинал", None),
+    "ar_1x1": ("1:1 (квадрат)", (1, 1)),
+    "ar_4x3": ("4:3", (4, 3)),
+    "ar_9x16": ("9:16 (сторис/шортс)", (9, 16)),
 }
 
 
@@ -126,6 +137,14 @@ def build_quality_keyboard(heights: list[int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def build_aspect_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text=label, callback_data=key)]
+        for key, (label, _) in ASPECT_RATIOS.items()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def format_for_quality(quality: str) -> dict:
     if quality == "q_best":
         # Принудительно H.264 + m4a для телефонов
@@ -147,6 +166,50 @@ def format_for_quality(quality: str) -> dict:
             ],
         }
     return {'format': 'bestvideo+bestaudio/best'}
+
+
+def is_audio_quality(quality: str) -> bool:
+    return quality in ("q_audio", "q_audio_orig")
+
+
+async def apply_aspect_ratio(input_path: str, ratio: tuple[int, int]) -> str:
+    """
+    Обрезает видео по центру до нужного соотношения сторон w:h с помощью ffmpeg
+    и возвращает путь к новому файлу. Аудиодорожка копируется без перекодирования.
+    """
+    a, b = ratio
+    root, _ext = os.path.splitext(input_path)
+    output_path = f"{root}_ar{a}x{b}.mp4"
+
+    # Ширина/высота вычисляются так, чтобы вписаться в исходный кадр по центру
+    crop_filter = f"crop='min(iw,ih*{a}/{b})':'min(ih,iw*{b}/{a})'"
+
+    cmd = [
+        FFMPEG_BIN,
+        "-y",
+        "-i", input_path,
+        "-vf", crop_filter,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-c:a", "copy",
+        output_path,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0 or not os.path.exists(output_path):
+        raise RuntimeError(
+            f"ffmpeg завершился с ошибкой (код {proc.returncode}): "
+            f"{stderr.decode(errors='ignore')[-500:]}"
+        )
+
+    return output_path
 
 
 @dp.message(Command("start"))
@@ -223,9 +286,45 @@ async def handle_quality_choice(callback: CallbackQuery):
         return
 
     await callback.answer()
+    quality = callback.data
+
+    if is_audio_quality(quality):
+        # для аудио соотношение сторон не нужно — сразу качаем
+        pending_quality.pop(user_id, None)
+        await run_download_and_send(callback, quality, ratio=None)
+    else:
+        # для видео сначала спрашиваем нужное соотношение сторон
+        pending_quality[user_id] = quality
+        await callback.message.edit_text(
+            "Выбери соотношение сторон:", reply_markup=build_aspect_keyboard()
+        )
+
+
+@dp.callback_query(F.data.startswith("ar_"))
+async def handle_aspect_choice(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    url = pending_urls.get(user_id)
+    platform = pending_platforms.get(user_id)
+    quality = pending_quality.get(user_id)
+
+    if not url or not platform or not quality:
+        await callback.answer("Сессия устарела, пришли ссылку заново.", show_alert=True)
+        return
+
+    await callback.answer()
+    _label, ratio = ASPECT_RATIOS.get(callback.data, ("Оригинал", None))
+    await run_download_and_send(callback, quality, ratio=ratio)
+
+
+async def run_download_and_send(
+    callback: CallbackQuery, quality: str, ratio: tuple[int, int] | None
+):
+    user_id = callback.from_user.id
+    url = pending_urls.get(user_id)
+    platform = pending_platforms.get(user_id)
+
     status_msg = await callback.message.edit_text("Скачиваю, подожди немного...")
 
-    quality = callback.data
     opts = format_for_quality(quality)
 
     ydl_opts = {
@@ -277,6 +376,8 @@ async def handle_quality_choice(callback: CallbackQuery):
         candidates.sort(key=os.path.getmtime, reverse=True)
         return candidates[0]
 
+    filepath = None
+    cropped_path = None
     try:
         video_id, title = await asyncio.to_thread(run_download)
         filepath = find_downloaded_file(video_id)
@@ -285,7 +386,23 @@ async def handle_quality_choice(callback: CallbackQuery):
             await status_msg.edit_text("Не удалось найти скачанный файл. Попробуй другое качество.")
             return
 
-        file_size = os.path.getsize(filepath)
+        send_path = filepath
+
+        # Меняем соотношение сторон, если это видео и выбрано не "Оригинал"
+        if ratio is not None and quality not in ("q_audio", "q_audio_orig"):
+            await status_msg.edit_text("Меняю соотношение сторон...")
+            try:
+                cropped_path = await apply_aspect_ratio(filepath, ratio)
+                send_path = cropped_path
+            except Exception as e:
+                logging.exception("Ошибка при обрезке видео")
+                await status_msg.edit_text(
+                    f"Не удалось изменить соотношение сторон: {e}\n"
+                    "Отправляю видео в оригинальном соотношении."
+                )
+                send_path = filepath
+
+        file_size = os.path.getsize(send_path)
 
         if file_size > MAX_TELEGRAM_SIZE:
             note = (
@@ -299,21 +416,23 @@ async def handle_quality_choice(callback: CallbackQuery):
         else:
             await status_msg.edit_text("Загружаю файл в Telegram...")
             if quality in ("q_audio", "q_audio_orig"):
-                await callback.message.answer_audio(FSInputFile(filepath), title=title)
+                await callback.message.answer_audio(FSInputFile(send_path), title=title)
             else:
-                await callback.message.answer_video(FSInputFile(filepath), caption=title)
+                await callback.message.answer_video(FSInputFile(send_path), caption=title)
             await status_msg.delete()
-
-        os.remove(filepath)
 
     except Exception as e:
         logging.exception("Ошибка при скачивании")
         await status_msg.edit_text(f"Произошла ошибка: {e}")
 
     finally:
+        for path in (filepath, cropped_path):
+            if path and os.path.exists(path):
+                os.remove(path)
         pending_urls.pop(user_id, None)
         pending_platforms.pop(user_id, None)
         pending_formats.pop(user_id, None)
+        pending_quality.pop(user_id, None)
 
 
 async def handle_ping(request):
